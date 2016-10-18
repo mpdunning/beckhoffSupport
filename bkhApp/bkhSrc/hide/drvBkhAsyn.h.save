@@ -1,0 +1,131 @@
+/* drvBkhAsyn.h
+ * Class hierarchy:
+ * drvBkhBase            +
+ * asynPortDriver        +--- drvBkhAsyn
+ *
+ * This driver is used to impment a driver class object to do IO with
+ * a Beckhoff IO terminals using modbus TCP protocol.
+ * Started on 6/26/2013, zms
+ *---------------------------------------------------------------------------*/
+#ifndef _drvBkhAsyn_h
+#define _drvBkhAsyn_h
+#include "asynPortDriver.h"
+#include "drvBkhBase.h"
+
+#define NELM		1024
+#define NCHAN		33
+#define PLEN		16
+
+#define wfMessageStr    "WF_MESSAGE"
+#define siNameStr	"SI_NAME"
+#define liRRegStr	"LI_RREG"
+#define liSByteStr	"LI_SBYTE"
+#define liDataInStr	"LI_DATA"
+
+#define liSWordStr	"LI_SWORD"
+#define loCByteStr	"LO_CBYTE"
+#define liCByteStr	"LI_CBYTE"
+#define loDataOutStr	"LO_DATAOUT"
+#define liDataOutStr	"LI_DATAOUT"
+
+#define loCWordStr	"LO_CWORD"
+#define liCWordStr	"LI_CWORD"
+#define loRChanStr	"LO_RCHAN"
+#define loRegNumStr	"LO_REGN"
+#define liSBValStr	"LI_SBVAL"
+
+#define liRegValStr	"LI_RVAL"
+#define loWRegValStr	"LO_WRVAL"
+#define liWRegValStr	"LI_WRVAL"
+#define siMIDStr	"SI_MID"
+#define loCRegStr	"LO_CREG"
+
+#define liCRegStr	"LI_CREG"
+#define boBitValStr	"BO_BVAL"
+#define biBitValStr	"BI_BVAL"
+#define boInitStr	"BO_INIT"
+#define boRefreshStr	"BO_REFRESH"
+
+#define loMAddrStr	"LO_MADDR"
+#define loMValStr	"LO_MVAL"
+#define liMValStr	"LI_MVAL"
+#define loMFuncStr	"LO_MFUNC"
+#define boMGetStr	"BO_MGET"
+
+#define boMPutStr	"BO_MPUT"
+#define boWDRstStr	"BO_WDRST"
+#define wfTHistStr	"WF_THIST"
+#define boTHistStr	"BO_THIST"
+#define boGetHistStr	"BO_GETHIST"
+
+#define liAllowInLQStr	"LI_ALLOWINLQ"
+#define loAllowInLQStr	"LO_ALLOWINLQ"
+#define liPollTmoStr	"LI_POLLTMO"
+#define loPollTmoStr	"LO_POLLTMO"
+
+typedef enum{ actUpdt,actWtChn,actRdHR,actWtHR,actWCplr} act_e;
+//typedef struct{ int addr; int rnum; int v; act_e act;} msgq_t;
+
+class drvBkhAsyn: public asynPortDriver, public drvBkhBase{
+public:
+  drvBkhAsyn( int id,const char* port,int addr,int func,int len,
+		int nchan,int msec,int nparm,int mflag=0);
+
+  virtual void resultCB( iodone_t* p);
+  virtual void updateUser( double tmo);
+  virtual asynStatus readInt32( asynUser* pau,epicsInt32* v);
+  virtual asynStatus readOctet( asynUser* pau,char* v,size_t nb,
+		size_t* na,int* eom);
+  virtual asynStatus writeInt8Array( asynUser* pau,epicsInt8* v,size_t n);
+  virtual asynStatus writeInt32( asynUser* pau,epicsInt32 v);
+  virtual void report( FILE* fp,int level);
+  void		exitHndl();
+  void		initDone( int flg);
+  void		updateThread();
+
+protected:
+  void		_message( char*);
+  asynStatus	_getChans( char* pd,int nch,int len,int pix);
+  asynStatus	_getBits( char* pd,int nch);
+  void		_gotMID( word* pd,int len);
+  void		_gotData( int addr,int pix,word* pd,int len);
+  void		_gotChannels( int func,word* pd,int len,int pix);
+  void		_refresh();
+
+  int	_wfMessage,  _siName,     _liRReg,    _liSByte,   _liDataIn,
+	_liSWord,    _loCByte,    _liCByte,   _loDataOut, _liDataOut,
+	_loCWord,    _liCWord,    _loRChan,   _loRegNum,  _liSBVal,
+	_liRegVal,   _loWRegVal,  _liWRegVal, _siMID,     _loCReg,
+	_liCReg,     _boBitVal,   _biBitVal,  _boInit,    _boRefresh,
+	_loMAddr,    _loMVal,     _liMVal,    _loMFunc,   _boMGet,
+	_boMPut,     _boWDRst,    _wfTHist,   _boTHist,   _boGetHist,
+	_liAllowInLQ,_loAllowInLQ,_liPollTmo, _loPollTmo;
+
+//#define FIRST_ITEM _wfMessage
+//#define LAST_ITEM  _loPollTmo
+//#define BKH_PARAMS (&LAST_ITEM - &FIRST_ITEM + 1)
+#define BKH_PARAMS 39
+
+enum{	ixWfMessage,  ixSiName,     ixLiRReg,   ixLiSByte,  ixLiDataIn,
+	ixLiSWord,    ixLoCByte,    ixLiCByte,  ixLoDataOut,ixLiDataOut,
+	ixLoCWord,    ixLiCWord,    ixLoRChan,  ixLoRegNum, ixLiSBVal,
+	ixLiRegVal,   ixLoWRegVal,  ixLiWRegVal,ixSiMID,    ixLoCReg,
+	ixLiCReg,     ixBoBitVal,   ixBiBitVal, ixBoInit,   ixBoRefresh,
+	ixLoMAddr,    ixLoMVal,     ixLiMVal,   ixLoMFunc,  ixBoMGet,
+	ixBoMPut,     ixBoWDRst,    ixWfTHist,  ixBoTHist,  ixBoGetHist,
+	ixLiAllowInLQ,ixLoAllowInLQ,ixLiPollTmo,ixLoPollTmo};
+
+private:
+  int		_id;		// unique type identifier for this driver,
+  char*		_port;
+  int		_saddr;		// modbus start memory address for this
+  int		_mfunc;		// modbus function for this driver
+  int		_mlen;		//modbus memory segment length
+  double        _tout;		// sleep period in sec for IOThread
+  char		_buf[NELM];
+  int		_firstix;
+  int		_nchan;
+  int		_motor;		// when true this driver does motor control
+};
+
+#endif // _drvBkhAsyn_h

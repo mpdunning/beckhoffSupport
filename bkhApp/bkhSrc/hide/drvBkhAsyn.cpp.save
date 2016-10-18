@@ -1,0 +1,481 @@
+/* drvBkhAsyn.cc
+ * This device driver is derived from drvBkhBase and asynPortDriver class.
+ * Started on 6/26/2013, zms.
+ *
+ * Here I attempt to implement a way to get "remote" IO done in the drvMBus
+ * driver, which has its own message queue and an IO thread.  The difficulty
+ * is that a notification mechanism is needed so that we get notified when
+ * the IO is done.  Probably should use a callback mechanism.  This is not
+ * yet fully implemented, will come back to it, maybe.
+ *---------------------------------------------------------------------------*/
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <errno.h>
+#include <math.h>
+
+#include <cantProceed.h>
+#include <epicsTypes.h>
+#include <epicsString.h>
+#include <epicsThread.h>
+#include <errlog.h>
+#include <epicsExit.h>
+#include <epicsExport.h>
+#include <envDefs.h>
+#include <iocsh.h>
+
+#include "drvBkhAsyn.h"
+
+#define STRLEN	128
+
+static const char *dname="drvBkhAsyn";
+static int __initdone;
+
+extern "C"{
+//static void exitHndlC( void* pvt){
+//  drvBkhAsyn* pthis=(drvBkhAsyn*)pvt;
+//  pthis->exitHndl();
+//}
+static void updateThreadC( void* p){
+  drvBkhAsyn* pthis=(drvBkhAsyn*)p;
+  pthis->updateThread();
+}
+}
+void drvBkhAsyn::updateThread(){
+/*-----------------------------------------------------------------------------
+ * request periodic updates.
+ *---------------------------------------------------------------------------*/
+  static const char* iam="updateThread"; int updt=CHNUPDT;
+printf( "%s::%s:%s:===== motor=%d ===\n",dname,_port,iam,_motor);
+  if(_motor) updt=MOTUPDT;
+  epicsThreadSleep(1.0);
+  while(1){
+    epicsThreadSleep(_tout);
+    if(__initdone){
+      readChanls(updt);
+      updateUser(_tout);
+    }
+  }
+}
+//void drvBkhAsyn::exitHndl(){
+/*-----------------------------------------------------------------------------
+ *---------------------------------------------------------------------------*/
+//  errlogPrintf( "%s::%s:exitHndl: Clear ID\n",dname,_port);
+//}
+void drvBkhAsyn::updateUser( double tmo){}
+/*----- do nothing virtual --------------------------------------------------*/
+
+void drvBkhAsyn::initDone( int flg){
+/*-----------------------------------------------------------------------------
+ * Sets the static __initdone variable to the value in flg.
+ * It controls periodic updates.  Updates are inhibited if __initdone is false.
+ * The delaying updates is important when this device driver is used as a base
+ * for the Beckhoff stepper motor driver.
+ *---------------------------------------------------------------------------*/
+  __initdone=flg;
+}
+void drvBkhAsyn::resultCB( iodone_t* p){
+/*-----------------------------------------------------------------------------
+ * This is a callback routine that drvMBus driver call for each completed
+ * IO request.
+ * To be able to pick up the thread we need:
+ * asyn address, that is the address index in the parameter library for
+ * a given parameter,
+ * parameter index in the parameter library,
+ *---------------------------------------------------------------------------*/
+  if(p->func<=MODBUS_READ_INPUT_REGISTERS) switch(p->pix){
+    case ixSiMID:	_gotMID( p->data,p->len); break;
+    case MOTUPDT:	// no break here!
+    case CHNUPDT:	_gotChannels( p->func,p->data,p->len,p->pix); break;
+    default:		
+//printf( "%s::%s:resultCB: addr=%d,func=%d,*p=0x%x,len=%d,pix=%d,stat=%d\n",
+//dname,_port,p->addr,p->func,*p->data,p->len,p->pix,p->stat);
+			_gotData( p->addr,p->pix,p->data,p->len); break;
+  }
+}
+void drvBkhAsyn::_gotMID( word* pd,int len){
+/*-----------------------------------------------------------------------------
+ * Received Coupler MID data, post it.
+ *---------------------------------------------------------------------------*/
+  char b[16]; char* pc; int i; word* pw=pd;
+  for( i=0; i<8; i++,pw++){
+    pc=(char*)pw;
+    b[2*i]=(*pc);
+    pc++;
+    b[2*i+1]=(*pc);
+    pc++;
+  }
+  b[15]=0;
+  setStringParam( 0,_siMID,b);
+  callParamCallbacks(0);
+}
+void drvBkhAsyn::_gotData( int addr,int pix,word* pd,int len){
+/*-----------------------------------------------------------------------------
+ * Received data in pd of length len words to be posted to addr and pix.
+ *---------------------------------------------------------------------------*/
+  int v=(*pd);
+//  if((!_motor)&&(v&0x8000)) v=(v|0xffff0000); 
+  if((_id==analogSE)&&(v&0x8000)) v=(v|0xffff0000); 
+  setIntegerParam( addr,pix,v);
+  callParamCallbacks( addr);
+//printf( "%s::%s:gotData: addr=%d,pix=%d,d=0x%x\n",dname,_port,addr,pix,*pd);
+}
+void drvBkhAsyn::_message( char* p){
+/*-----------------------------------------------------------------------------
+ * Puts a null terminated string in p in the _wfMessage waveform record.
+ *---------------------------------------------------------------------------*/
+  int n=MIN(STRLEN,MAX(0,strlen(p)+1));
+  if(!n) return;
+  setStringParam( 0,_wfMessage,p);
+//  doCallbacksInt8Array( p,n,_wfMessage,0);
+  *p=0;
+}
+void drvBkhAsyn::_gotChannels( int func,word* pd,int len,int pix){
+/*-----------------------------------------------------------------------------
+ * Unpack received data and post.
+ *---------------------------------------------------------------------------*/
+  switch(func){
+    case MODBUS_READ_COILS:		break;
+    case MODBUS_READ_DISCRETE_INPUTS:	_getBits( (char*)pd,_nchan); break;
+    case MODBUS_READ_HOLDING_REGISTERS:	_getChans( (char*)pd,_nchan,len,pix);
+					break;
+    case MODBUS_READ_INPUT_REGISTERS:	break;
+  }
+}
+asynStatus drvBkhAsyn::_getChans( char* pd,int nch,int len,int pix){
+/*-----------------------------------------------------------------------------
+ * Process image data is in buffer pd from which we extract nch number of
+ * channel data.  len is the number of channels times number of words per
+ * channel.
+ *---------------------------------------------------------------------------*/
+  int i,n=len/nch; epicsUInt16* pw=(epicsUInt16*)pd; int iv,i1,i2;
+  if(len!=n*nch){
+    errlogPrintf( "%s::_getChans: nch=%d,len=%d are inconsistent\n",
+		dname,nch,len);
+    return(asynError);
+  }
+//printf( "%s::%s:_getChans:nch=%d,pix=%d,data=(0x%x,0x%x,0x%x)\n",
+//dname,_port,nch,pix,pw[0],pw[1],pw[2]);
+  for( i=0; i<nch; i++){
+    i1=iv=(*pw);
+    setIntegerParam( i,_liSByte,iv);
+    pw++;
+    i2=iv=(*pw);
+    if(pix==CHNUPDT){
+//      if((iv)&0x8000) iv=(iv)|0xffff0000;
+      if((_id==analogSE)&&((iv)&0x8000)) iv=(iv)|0xffff0000;
+    }
+    setIntegerParam( i,_liDataIn,iv);
+    pw++;
+    if(pix==MOTUPDT){
+      iv=(*pw);
+      setIntegerParam( i,_liSWord,iv);
+      pw++;
+    }
+    callParamCallbacks( i);
+//printf( "%s::_getChans: i=%d, i1=0x%x, i2=0x%x\n",dname,i,i1,i2);
+  }
+  return(asynSuccess);
+}
+asynStatus drvBkhAsyn::_getBits( char* pd,int nch){
+/*-----------------------------------------------------------------------------
+ * Process image data is in buffer pd from which we extract nch number of
+ * channel data.  Post in bi records.
+ *---------------------------------------------------------------------------*/
+  int i; epicsUInt16* pw=(epicsUInt16*)pd; int iv;
+  for( i=0; i<nch; i++){
+    iv=(*pw);
+    setIntegerParam( i,_biBitVal,iv);
+    pw++;
+    callParamCallbacks( i);
+  }
+  return(asynSuccess);
+}
+void drvBkhAsyn::_refresh(){
+/*-----------------------------------------------------------------------------
+ * Request reding BK9000 Coupler readonly registers.
+ *---------------------------------------------------------------------------*/
+  static int rlist[]={10,11,12,16,17,18,19,32};
+  int i,n=SIZE(rlist); asynStatus stat;
+  for( i=0; i<n; i++){
+    stat=readOne( rlist[i],_liCReg);
+    if(stat!=asynSuccess){
+      errlogPrintf( "%s::_refresh: i=%d, failed in _readOne\n",dname,i);
+      break;
+    }
+  }
+}
+void drvBkhAsyn::report( FILE* fp,int level){
+/*-----------------------------------------------------------------------------
+ * Print some parameters and statistics.
+ *---------------------------------------------------------------------------*/
+  pmbus->report();
+  printf( "Report for %s::%s -- id=%d -------------\n",dname,_port,_id);
+  printf( "  start modbus address = %d (0x%x),",_saddr,_saddr);
+  printf( "  modbus function = %d, length = %d\n",_mfunc,_mlen);
+  printf( "  number of channels = %d\n",_nchan);
+  asynPortDriver::report( fp,level);
+  errlogFlush();
+}
+asynStatus drvBkhAsyn::readInt32( asynUser* pau,epicsInt32* v){
+/*-----------------------------------------------------------------------------
+ * Reimplementation of asynPortDriver virtual function.
+ *---------------------------------------------------------------------------*/
+  asynStatus stat=asynSuccess; int ix,addr; word val;
+  stat=getAddress(pau,&addr); if(stat!=asynSuccess) return(stat);
+  ix=pau->reason-_firstix;
+  if(addr<0||addr>=NCHAN) return(asynError);
+//printf( "%s::%s:readInt32: ix=%d,addr=%d\n",dname,_port,ix,addr);
+  switch( ix){
+    case ixLiPollTmo:	*v=_tout*1000.0; break;
+    case ixLiCReg:	stat=readOne( addr,_liCReg); break;
+    case ixLiRReg:	break;
+    case ixLiDataIn:	break;
+    case ixBiBitVal:	stat=readOne( addr,_biBitVal); break;
+    case ixLiCByte:	stat=doRead( _saddr+WOFFST,addr,2,0,_liCByte);
+//printf( "%s::%s:readInt32:ixLiCByte:addr=%d,stat=%d\n",dname,_port,addr,stat);
+			break;
+    case ixLiDataOut:	stat=doRead( _saddr+WOFFST,addr,2,1,_liDataOut);
+			break;
+    case ixLiCWord:	stat=doRead( _saddr+WOFFST,addr,2,2,_liCWord); break;
+    case ixLiAllowInLQ:	*v=pmbus->getAllowInLQ(); break;
+    default:    stat=asynError; break;
+  }
+  callParamCallbacks(0);
+  return(stat);
+}
+asynStatus drvBkhAsyn::readOctet( asynUser* pau,char* v,
+			size_t nb,size_t* na,int* eom){
+/*-----------------------------------------------------------------------------
+ * Reimplementation of asynPortDriver virtual function.
+ *---------------------------------------------------------------------------*/
+  asynStatus stat=asynSuccess; int ix,addr;
+  stat=getAddress(pau,&addr); if(stat!=asynSuccess) return(stat);
+  ix=pau->reason-_firstix;
+  if(addr<0||addr>=NCHAN) return(asynError);
+  switch( ix){
+    default:    asynPortDriver::readOctet( pau,v,nb,na,eom); break;
+  }
+  callParamCallbacks(0);
+  return(stat);
+}
+asynStatus drvBkhAsyn::writeInt8Array( asynUser* pau,epicsInt8* v,size_t n){
+/*-----------------------------------------------------------------------------
+ * Replace the function in asynPortDriver...
+ *---------------------------------------------------------------------------*/
+  asynStatus stat=asynSuccess; int ix,addr;
+
+  stat=getAddress(pau,&addr); if(stat!=asynSuccess) return(stat);
+  ix=pau->reason-_firstix;
+
+  switch(ix){
+    default:		break;
+  }
+  stat=callParamCallbacks();
+  return(stat);
+}
+asynStatus drvBkhAsyn::writeInt32( asynUser* pau,epicsInt32 v){
+/*-----------------------------------------------------------------------------
+ * This method queues a write message internally.  The actual write s done in
+ * the ioTask.
+ * Parameters:
+ *  paUser	(in) structure containing addr and reason.
+ *  v	(in) this is the command index, which together with
+ *		paUser->reason define the command to be sent.
+ *---------------------------------------------------------------------------*/
+  asynStatus stat=asynSuccess; word w; int maddr,n; epicsInt32* pwf;
+  int addr,chan,wfunc,aa,ff,vv,rnum,reason=pau->reason-_firstix;
+
+//printf( "%s::writeInt32:reason=%d,v=%d\n",dname,reason,v);
+  stat=getAddress(pau,&addr); if(stat!=asynSuccess) return(stat);
+
+  switch( reason){
+    case ixLoPollTmo:	_tout=(float)v/1000.0;
+			setIntegerParam( _liPollTmo,v); break;
+    case ixLoRChan:	setIntegerParam( 0,_loRChan,v); break;
+    case ixLoRegNum:	getIntegerParam( 0,_loRChan,&chan);
+			setIntegerParam( 0,_loRegNum,v);
+			stat=readHReg( 0,addr,chan,v,_liRegVal); break;
+    case ixLoWRegVal:	getIntegerParam( 0,_loRChan,&chan);
+			getIntegerParam( 0,_loRegNum,&rnum);
+			stat=writeHReg( 0,chan,rnum,v,_liWRegVal); break;
+    case ixLoCReg:	stat=writeOne( addr,v); break;
+    case ixLoCByte:	maddr=_saddr+WOFFST;
+			wfunc=MODBUS_WRITE_SINGLE_REGISTER;
+			stat=doWrite( maddr,addr,2,0,wfunc,v,_loCByte);
+//printf( "%s::%s:writeInt32:ixLoCByte: addr=%d,v=0x%x\n",dname,_port,addr,v);
+			setIntegerParam( addr,_liCByte,v); break;
+    case ixLoDataOut:	maddr=_saddr+WOFFST;
+			wfunc=MODBUS_WRITE_SINGLE_REGISTER;
+			stat=doWrite( maddr,addr,2,1,wfunc,v);
+			stat=doRead( maddr,addr,2,0,_liSByte);
+			stat=doRead( maddr,addr,2,1,_liDataOut);
+			break;
+    case ixLoCWord:	maddr=_saddr+WOFFST;
+			wfunc=MODBUS_WRITE_SINGLE_REGISTER;
+			stat=doWrite( maddr,addr,2,2,wfunc,v);
+			setIntegerParam( addr,_liCWord,v); break;
+    case ixBoBitVal:	stat=writeChan( addr,v); break;
+    case ixBoInit:	readMID( _siMID); break;
+    case ixBoRefresh:	_refresh(); break;
+    case ixBoWDRst:	stat=watchdogReset(); break;
+    case ixLoMAddr:	setIntegerParam( 0,_loMAddr,v);
+//printf( "%s::%s:writeInt32: ixLoMAddr,v=%d\n",dname,_port,v);
+			break;
+    case ixLoMVal:	setIntegerParam( 0,_loMVal,v);
+//printf( "%s::%s:writeInt32: ixLoMVal,v=%d\n",dname,_port,v);
+			break;
+    case ixLoMFunc:	setIntegerParam( 0,_loMFunc,v);
+//printf( "%s::%s:writeInt32: ixLoMFunc,v=%d\n",dname,_port,v);
+			break;
+    case ixBoMGet:	if(!v) break;
+			getIntegerParam( 0,_loMAddr,&aa);
+			getIntegerParam( 0,_loMFunc,&ff);
+			stat=doIO( normal_e,aa,0,ff,_liMVal,0);
+//printf( "%s::%s:writeInt32:ixBoGet: v=%d\n",dname,_port,v);
+			break;
+    case ixBoMPut:	getIntegerParam( 0,_loMAddr,&aa);
+			getIntegerParam( 0,_loMFunc,&ff);
+			getIntegerParam( 0,_loMVal,&vv);
+			w=vv;
+			stat=doIO( normal_e,aa,0,ff,0,vv); break;
+    case ixBoTHist:	pmbus->doHist(v); break;
+    case ixBoGetHist:	n=HISTOGRAM_LENGTH;
+			pwf=pmbus->getHist();
+			doCallbacksInt32Array( pwf,n,_wfTHist,0);
+			break;
+    case ixLoAllowInLQ:	pmbus->putAllowInLQ(v);
+			setIntegerParam( 0,_liAllowInLQ,pmbus->getAllowInLQ());
+			break;
+    default:		return(stat);
+  }
+  stat=callParamCallbacks();
+  return(stat);
+}
+drvBkhAsyn::drvBkhAsyn( int id,const char* port,int addr,int func,int len,
+	int nchan,int msec,int nparm,int mflag):
+	asynPortDriver( port,NCHAN,nparm,
+		asynInt32Mask|asynInt32ArrayMask|asynOctetMask|asynDrvUserMask,
+		asynInt32Mask|asynInt32ArrayMask|asynOctetMask,
+		ASYN_CANBLOCK|ASYN_MULTIDEVICE,1,0,0),
+	drvBkhBase( id,port,addr,func,len){
+/*-----------------------------------------------------------------------------
+ * Constructor for the drvBkhAsyn class. Calls constructor for the
+ * asynPortDriver base class and drvBkhBase base class. Where
+ *  port is the asyn port number.
+ *  addr is the modbus memory segment start address,
+ *  func is modbus default function for this object,
+ *  len is modbus memory segment length,
+ *  nchan is the actual number of channels that will be added.
+ *  msec  is IO thread timeout in mili seconds.
+ * Parameters passed to the asynPortDriver constructor:
+ *  port name
+ *  max address
+ *  parameter table size
+ *  interface mask
+ *  interrupt mask,
+ *  asyn flags,
+ *  auto connect
+ *  priority
+ *  stack size
+ *---------------------------------------------------------------------------*/
+  _port=(char*)callocMustSucceed( strlen(port)+1,sizeof(char),dname);
+  strcpy((char*)_port,port);
+  _nchan=MIN(nchan,NCHAN); _tout=msec/1000.0;
+  _saddr=addr; _mfunc=func; _mlen=len; _motor=mflag; _id=id;
+
+  createParam( wfMessageStr,    asynParamOctet,		&_wfMessage);
+  createParam( siNameStr,	asynParamOctet,		&_siName);
+  createParam( liRRegStr,	asynParamInt32,		&_liRReg);
+  createParam( liSByteStr,	asynParamInt32,		&_liSByte);
+  createParam( liDataInStr,	asynParamInt32,		&_liDataIn);
+
+  createParam( liSWordStr,	asynParamInt32,		&_liSWord);
+  createParam( loCByteStr,	asynParamInt32,		&_loCByte);
+  createParam( liCByteStr,	asynParamInt32,		&_liCByte);
+  createParam( loDataOutStr,	asynParamInt32,		&_loDataOut);
+  createParam( liDataOutStr,	asynParamInt32,		&_liDataOut);
+
+  createParam( loCWordStr,	asynParamInt32,		&_loCWord);
+  createParam( liCWordStr,	asynParamInt32,		&_liCWord);
+  createParam( loRChanStr,	asynParamInt32,		&_loRChan);
+  createParam( loRegNumStr,	asynParamInt32,		&_loRegNum);
+  createParam( liSBValStr,	asynParamInt32,		&_liSBVal);
+
+  createParam( liRegValStr,	asynParamInt32,		&_liRegVal);
+  createParam( loWRegValStr,	asynParamInt32,		&_loWRegVal);
+  createParam( liWRegValStr,	asynParamInt32,		&_liWRegVal);
+  createParam( siMIDStr,	asynParamOctet,		&_siMID);
+  createParam( loCRegStr,	asynParamInt32,		&_loCReg);
+
+  createParam( liCRegStr,	asynParamInt32,		&_liCReg);
+  createParam( boBitValStr,	asynParamInt32,		&_boBitVal);
+  createParam( biBitValStr,	asynParamInt32,		&_biBitVal);
+  createParam( boInitStr,	asynParamInt32,		&_boInit);
+  createParam( boRefreshStr,	asynParamInt32,		&_boRefresh);
+
+  createParam( loMAddrStr,	asynParamInt32,		&_loMAddr);
+  createParam( loMValStr,	asynParamInt32,		&_loMVal);
+  createParam( liMValStr,	asynParamInt32,		&_liMVal);
+  createParam( loMFuncStr,	asynParamInt32,		&_loMFunc);
+  createParam( boMGetStr,	asynParamInt32,		&_boMGet);
+
+  createParam( boMPutStr,	asynParamInt32,		&_boMPut);
+  createParam( boWDRstStr,	asynParamInt32,		&_boWDRst);
+  createParam( wfTHistStr,	asynParamInt32Array,	&_wfTHist);
+  createParam( boTHistStr,	asynParamInt32,		&_boTHist);
+  createParam( boGetHistStr,	asynParamInt32,		&_boGetHist);
+
+  createParam( liAllowInLQStr,	asynParamInt32,		&_liAllowInLQ);
+  createParam( loAllowInLQStr,	asynParamInt32,		&_loAllowInLQ);
+  createParam( liPollTmoStr,	asynParamInt32,		&_liPollTmo);
+  createParam( loPollTmoStr,	asynParamInt32,		&_loPollTmo);
+
+  _firstix=_wfMessage;
+printf( "%s::%s:%s: firstix=%d, last=%d\n",
+dname,dname,port,_firstix,_loPollTmo);
+
+  if((func<=MODBUS_READ_INPUT_REGISTERS)&&msec){
+    epicsThreadCreate( dname,epicsThreadPriorityLow,
+		epicsThreadGetStackSize(epicsThreadStackMedium),
+		(EPICSTHREADFUNC)updateThreadC,this);
+  }
+//  epicsAtExit( exitHndlC,this);
+  printf( "%s::%s: _locPort=%s configured\n",dname,dname,port);
+}
+
+// Configuration routine.  Called directly, or from the iocsh function below
+
+extern "C" {
+
+int drvBkhAsynConfig( int id,const char* port,int func,int addr,int len,
+		int nchan,int msec){
+/*-----------------------------------------------------------------------------
+ * EPICS iocsh callable function to call constructor for the drvBkhAsyn class.
+ *  port is the asyn port,
+ *  nchan is the actual number of channels that will be added.
+ *---------------------------------------------------------------------------*/
+  new drvBkhAsyn( id,port,addr,func,len,nchan,msec,BKH_PARAMS);
+  __initdone=1;
+  return(asynSuccess);
+}
+static const iocshArg confArg0={"id",iocshArgInt};
+static const iocshArg confArg1={"port",iocshArgString};
+static const iocshArg confArg2={"func",iocshArgInt};
+static const iocshArg confArg3={"addr",iocshArgInt};
+static const iocshArg confArg4={"len",iocshArgInt};
+static const iocshArg confArg5={"nchan",iocshArgInt};
+static const iocshArg confArg6={"msec",iocshArgInt};
+static const iocshArg* const confArgs[]={&confArg0,&confArg1,&confArg2,
+		&confArg3,&confArg4,&confArg5,&confArg6};
+static const iocshFuncDef confFuncDef={"drvBkhAsynConfig",7,confArgs};
+static void confCallFunc(const iocshArgBuf *args){
+  drvBkhAsynConfig( args[0].ival,args[1].sval,args[2].ival,args[3].ival,
+		args[4].ival,args[5].ival,args[6].ival);
+}
+
+void drvBkhAsynRegister(void){
+  iocshRegister(&confFuncDef,confCallFunc);
+}
+epicsExportRegistrar(drvBkhAsynRegister);
+}

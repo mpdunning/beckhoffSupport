@@ -1,0 +1,52 @@
+1/20/2015, zms
+In this release the handling of "at limit" situation is reworked.  Previously,
+when a stage motion was stopped as a limit swith was activated, the operator
+needed to press a push button to move the stage away from the limit switch.
+In this release changes are made such that the operator can move the stage
+away from the activated limit switch by pressing the push buttons used for
+normal motion, while the buttons used to move the stage towards the activated
+limit switch remain disabled until the motion stops.
+
+2/25/2014, zms
+In this release more code is added to allow the home position be defined to be
+either at negative limit switch, positive limit switch, or a current position.
+More code is added to home the stage according to definition of home.
+If home is defined at a limit switch, then the motor is driven to the limit
+switch, when the limit switch is activated, the motion is reversed and the
+stage moved slowly until the limit switch is deactivated and this position is
+marked as home.
+If home is defined as a current position, then the current position is marked
+as home.
+If the stage is not equipped with limit switches, then only home at current
+position is allowed.
+A function callable from st.cmd file
+  drvBkhAMotSetup( int hometype,int neglim,int poslim)
+where hometype can be either
+      0 at negative limit switch,
+      1 at current position,
+      2 at positive limit switch.
+      neglim if 1, have a negative limit switch, if 0 do not have one,
+      poslim if 1, have a positive limit switch, if 0 do not have one.
+Negative limit switch is reached by driving the motor in the direction of
+decreasing step count direction, and the positive limit switch is reached by
+driving the motor in the direction of increasing step count direction.
+
+Note that one can connect motor coil wires to the controller to get the motor
+rotate in the desired direction.  To put it differently, by adjusting the
+direction of motor rotation, either of the two limit switches could be defined
+either positive or negative.
+
+3/2/2015, zms
+In this release functionality was added to home the stage.  A new function
+drvBkhAMotSetup( const char* port,int hometype,int neglim,int poslim)
+was added, which is callable from st.cmd file.  It is used to define homing
+parameters:
+hometype: 1 home at negative switch, 2 make home at current
+            position, 3 home at positive switch.
+neglim if 1 limit switch present at negative position.
+poslim if 1 limit switch present at positive position.
+If either neglim or poslim is 0, that limit switch is not present.
+Implementing the homing functions required some code reorganization.  This
+is reflected in how the motor driver is configured in the st.cmd file.
+In this release, one object is created for each axis.  Previously, three
+objects were created.

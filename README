@@ -1,0 +1,39 @@
+In this version three classes are used:
+drvMBus     This is a standalone class that does all modbus IO.  An instance of
+            this class is accessed via a pointer.
+drvBkhAsyn  This class handles communication with basic Beckhoff systems.
+            It can be used to build an IOC for use with most bBeckhoff hardware
+            excluding the stepper motor controllers.
+drvBkhAMot  This class is based on drvBkhAsyn class and is intended for
+            controlling stepper motors via the Beckhoff KL2531 and KL2541
+            bus terminals.
+
+Presently, the low priority message queue is using max number of messages
+of 500 and the High priority message is using 300.  All initial reading of
+register values is done via the high priority message queue.  Each motor
+stepper control driver object is initializing 31 hidden registers.  This
+results in 3x or 93 IOs per driver object.  The 300 value may need to be
+increased for a larger setup.
+
+Last modified on 7/29/2013 (zms)
+
+In Feb of 2015, rewrite the motor class to add homing functions.  This also
+required modifications to consolidate all motor parameters into one object
+of the class.  Some small modifications were also needed in the Beckhoff base
+class.
+
+Known problems:
+1. When a stage is homed and the home button is pressed again before the stage
+  is moved, this needs to be aborted by using the Stop button.  To put it
+  differently, homing can't be done if the stage is at home position and the
+  stage was not yet moved since it was homed.
+2. When the stage is moved to the limit thus activating a limit switch, the
+  motion is stopped.  Of the three buttons to start motion only the relative
+  move button to move the stage away from the limit is active.  The problem
+  is that the Go button should also be enabled if the absolute move setup in
+  input widget would result in a move away from the limit.  Presently this
+  is not working.
+3. When the IOC is restarted, it does not know if the stage is homed or not
+  eventhough the Beckhoff controller still has the correct home position
+  defined.  The home position is defined as 0 position.  This information
+  is lost if the Beckhoff controller is power cycled.
